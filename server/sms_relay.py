@@ -25,6 +25,7 @@ import urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from serial_780 import serial_780, start_serial_worker
 import sim_info
+import tg_settings
 
 # ==================== 配置区 ====================
 CONFIG = {
@@ -250,6 +251,41 @@ def send_bark(title, body, url=None, copy=None):
         print(f"[Bark Error] 推送失败: {e}", file=sys.stderr)
         return False
 
+# ==================== Telegram 推送 ====================
+TG_CFG_PATH = os.path.join(os.path.dirname(os.getenv("DB_PATH", "/var/lib/sms-relay/sms.db")), "telegram.json")
+tg_cfg = tg_settings.Settings(TG_CFG_PATH)
+
+
+def send_tg(title, body):
+    try:
+        c = tg_cfg.load()
+        if not (c.get("enabled") and c.get("bot_token") and c.get("chat_id")):
+            return False
+        import subprocess, tempfile
+        from urllib.parse import quote
+        text = title + "\n" + body
+        lines = ['url = ' + quote('https://api.telegram.org/bot' + c['bot_token'] + '/sendMessage', safe=':/?&='),
+                 'silent = true', 'write-out = %{"ok":true}', '']
+        if c.get('proxy_url'):
+            lines.append('proxy = ' + c['proxy_url'])
+        fd, name = tempfile.mkstemp(prefix='.tg-', dir=os.path.dirname(TG_CFG_PATH) or '/tmp')
+        try:
+            with os.fdopen(fd, 'w') as f:
+                f.write('\n'.join(lines))
+            cmd = ['curl', '-sS', '--config', name,
+                   '--data-urlencode', 'chat_id=' + c['chat_id'],
+                   '--data-urlencode', 'text=' + text,
+                   '--data-urlencode', 'disable_web_page_preview=true']
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            return '"ok":true' in r.stdout
+        finally:
+            try: os.unlink(name)
+            except OSError: pass
+    except Exception as e:
+        print(f"[TG] 推送失败: {e}", file=sys.stderr)
+        return False
+
+
 # ==================== 通知推送模块 ====================
 def send_notification(sender, content):
     # 1. Bark 通道（优先，支持加密+验证码副标题）
@@ -257,6 +293,16 @@ def send_notification(sender, content):
         code = extract_sms_code(content)
         title = f"💬 新短信 · {sender}" + (f" · 验证码 {code}" if code else "")
         send_bark(title, content[:80], copy=code)
+
+    # 1.5 Telegram 通道
+    try:
+        c = tg_cfg.load()
+        if c.get("enabled") and c.get("bot_token") and c.get("chat_id"):
+            code2 = extract_sms_code(content)
+            t2 = f"💬 新短信 · {sender}" + (f" · 验证码 {code2}" if code2 else "")
+            send_tg(t2, content[:400])
+    except Exception:
+        pass
 
     # 2. 兼容旧 NOTIFY_URL webhook 通道（保留原有行为）
     notify_url = CONFIG["NOTIFY_URL"].strip()
@@ -303,218 +349,163 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>YN076 短信网关</title>
 <style>
-:root {
-  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-  --radius: 16px; --radius-sm: 10px;
-  --accent: #2563eb; --accent-2: #3b82f6; --accent-grad: linear-gradient(135deg, #2563eb, #3b82f6);
-  --ok: #10b981; --warn: #f59e0b; --bad: #ef4444; --violet: #8b5cf6;
-}
-[data-theme="light"] {
-  --bg: #f1f5f9; --bg-accent-1: rgba(37,99,235,.08); --bg-accent-2: rgba(139,92,246,.07);
-  --card: #ffffff; --card-2: #f8fafc; --border: #e2e8f0; --border-soft: #eef2f7;
-  --text: #0f172a; --text-2: #475569; --text-3: #94a3b8;
-  --chip: #f1f5f9; --chip-hover: #e2e8f0;
-  --shadow: 0 1px 2px rgba(15,23,42,.04), 0 4px 16px rgba(15,23,42,.06);
-  --shadow-lg: 0 12px 40px rgba(15,23,42,.12);
-  --toast-bg: #0f172a; --toast-fg: #f8fafc;
-}
-[data-theme="dark"] {
-  --bg: #0b1220; --bg-accent-1: rgba(37,99,235,.14); --bg-accent-2: rgba(139,92,246,.10);
-  --card: #101a2c; --card-2: #0d1526; --border: #1e293b; --border-soft: #16203a;
-  --text: #e2e8f0; --text-2: #94a3b8; --text-3: #64748b;
-  --chip: #16203a; --chip-hover: #1e293b;
-  --shadow: 0 1px 2px rgba(0,0,0,.3), 0 6px 20px rgba(0,0,0,.25);
-  --shadow-lg: 0 16px 48px rgba(0,0,0,.5);
-  --toast-bg: #e2e8f0; --toast-fg: #0f172a;
-}
 * { box-sizing: border-box; margin: 0; padding: 0; }
-html { scrollbar-gutter: stable; }
-body {
-  font-family: var(--font); background: var(--bg); color: var(--text);
-  line-height: 1.55; min-height: 100vh;
-  background-image: radial-gradient(600px 300px at 8% -4%, var(--bg-accent-1), transparent 70%),
-                    radial-gradient(700px 360px at 100% 0%, var(--bg-accent-2), transparent 70%);
-  background-attachment: fixed;
+:root {
+  --bg: #F9FAFC; --side: #FFFFFF; --card: #FFFFFF;
+  --text: #1D2129; --text-2: #4E5969; --text-3: #86909C;
+  --border: #E5E6EB; --accent: #3F67BC; --accent-2: #EAF0FB;
+  --ok: #00B42A; --warn: #FF7D00; --bad: #F53F3F; --violet: #7C5CFC;
+  --radius: 10px; --side-w: 224px;
 }
-.wrap { max-width: 1200px; margin: 0 auto; padding: 20px 16px 48px; }
+body[data-theme="dark"] {
+  --bg: #17181C; --side: #1E1F24; --card: #1E1F24;
+  --text: #F2F3F5; --text-2: #C0C6CF; --text-3: #8A919C;
+  --border: #2B2C31; --accent: #5C84E0; --accent-2: #232B3D;
+}
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--text); font-size: 15px; -webkit-font-smoothing: antialiased; }
+.layout { display: flex; min-height: 100vh; }
+aside { width: var(--side-w); flex-shrink: 0; background: var(--side); border-right: 1px solid var(--border); display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh; }
+.main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.topbar { height: 54px; display: flex; align-items: center; gap: 10px; padding: 0 26px; background: var(--side); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 20; }
+.content { padding: 22px 26px 48px; max-width: 1040px; width: 100%; margin: 0 auto; }
 
-/* ===== 顶栏 ===== */
-header {
-  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
-  padding: 18px 22px; margin-bottom: 18px;
-  background: var(--card); border: 1px solid var(--border);
-  border-radius: var(--radius); box-shadow: var(--shadow);
-}
-.brand { display: flex; align-items: center; gap: 12px; margin-right: auto; }
-.logo {
-  width: 40px; height: 40px; border-radius: 12px; background: var(--accent-grad);
-  display: grid; place-items: center; font-size: 20px; color: #fff;
-  box-shadow: 0 4px 14px rgba(37,99,235,.35);
-}
-.brand h1 { font-size: 1.1rem; font-weight: 700; letter-spacing: .2px; }
-.brand small { display: block; font-size: .72rem; color: var(--text-3); font-weight: 500; }
-.badge {
-  display: inline-flex; align-items: center; gap: 6px;
-  font-size: .74rem; font-weight: 600; padding: 5px 12px; border-radius: 999px;
-  border: 1px solid transparent; white-space: nowrap;
-}
-.badge-online { background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); border-color: color-mix(in srgb, var(--ok) 30%, transparent); }
-.badge-offline { background: color-mix(in srgb, var(--bad) 12%, transparent); color: var(--bad); border-color: color-mix(in srgb, var(--bad) 30%, transparent); }
-.badge-lock { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 28%, transparent); }
-.badge-unlock { background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn); border-color: color-mix(in srgb, var(--warn) 32%, transparent); }
-.dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-.badge-online .dot { animation: pulse 2s infinite; }
-@keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+.brand { display: flex; align-items: center; gap: 10px; padding: 15px 16px 12px; }
+.brand .logo { width: 34px; height: 34px; border-radius: 9px; background: linear-gradient(135deg, var(--accent), var(--violet)); display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0; }
+.brand h1 { font-size: .92rem; font-weight: 700; line-height: 1.25; color: var(--text); }
+.brand small { display: block; font-size: .66rem; color: var(--text-3); font-weight: 400; }
+nav { flex: 1; padding: 4px 10px; overflow-y: auto; }
+.nav-sec { font-size: .66rem; color: var(--text-3); padding: 13px 10px 5px; letter-spacing: .06em; }
+.nav-item { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 8px; color: var(--text-2); font-size: .85rem; cursor: pointer; user-select: none; border: none; background: none; width: 100%; text-align: left; font-family: inherit; transition: background .15s, color .15s; }
+.nav-item:hover { background: var(--bg); color: var(--text); }
+.nav-item.active { background: var(--accent-2); color: var(--accent); font-weight: 600; }
+.nav-item .nico { width: 20px; text-align: center; font-size: 14px; }
+.side-foot { padding: 10px; border-top: 1px solid var(--border); }
+.side-user { display: flex; align-items: center; gap: 10px; padding: 7px 9px; border-radius: 8px; }
+.side-user .avatar { width: 30px; height: 30px; border-radius: 50%; background: linear-gradient(135deg, #7C5CFC, #3F67BC); color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.side-user .sun { font-size: .78rem; font-weight: 600; }
+.side-user .seu { font-size: .66rem; color: var(--text-3); }
 
-/* ===== 按钮 ===== */
-button {
-  font-family: inherit; cursor: pointer; border: none; border-radius: var(--radius-sm);
-  font-size: .84rem; font-weight: 600; padding: 9px 16px;
-  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
-  transition: transform .15s ease, box-shadow .15s ease, background .15s ease;
-}
-button:active { transform: scale(.97); }
-button:disabled { opacity: .55; cursor: not-allowed; transform: none; }
-.btn { background: var(--accent-grad); color: #fff; box-shadow: 0 4px 14px rgba(37,99,235,.3); }
-.btn:hover:not(:disabled) { box-shadow: 0 6px 20px rgba(37,99,235,.42); }
-.btn-violet { background: linear-gradient(135deg, #7c3aed, #8b5cf6); color: #fff; box-shadow: 0 4px 14px rgba(139,92,246,.3); }
-.btn-ok { background: color-mix(in srgb, var(--ok) 16%, var(--card)); color: var(--ok); border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent); }
-.btn-bad { background: color-mix(in srgb, var(--bad) 12%, var(--card)); color: var(--bad); border: 1px solid color-mix(in srgb, var(--bad) 30%, transparent); }
-.btn-ghost { background: transparent; color: var(--text-2); border: 1px solid var(--border); }
-.btn-ghost:hover { background: var(--chip); color: var(--text); }
-.btn-sm { padding: 5px 11px; font-size: .76rem; border-radius: 8px; }
-.icon-btn { background: var(--chip); color: var(--text-2); border-radius: 10px; padding: 8px 11px; }
-.icon-btn:hover { background: var(--chip-hover); color: var(--text); }
+.page { display: none; }
+.page.active { display: block; animation: fadeIn .18s ease; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 
-/* ===== Bento 统计卡 ===== */
-.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(215px, 1fr)); gap: 14px; margin-bottom: 18px; }
-.stat {
-  position: relative; overflow: hidden;
-  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
-  padding: 16px 18px; box-shadow: var(--shadow);
-  transition: transform .2s ease, box-shadow .2s ease;
-}
-.stat:hover { transform: translateY(-2px); box-shadow: var(--shadow-lg); }
-.stat::before {
-  content: ''; position: absolute; inset: 0 0 auto 0; height: 3px;
-  background: var(--accent-grad); opacity: .85;
-}
-.stat.v::before { background: linear-gradient(90deg, #7c3aed, #8b5cf6); }
-.stat.g::before { background: linear-gradient(90deg, #059669, #10b981); }
-.stat.o::before { background: linear-gradient(90deg, #d97706, #f59e0b); }
-.stat-label { font-size: .76rem; color: var(--text-3); font-weight: 600; display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
-.stat-value { font-size: 1.35rem; font-weight: 750; letter-spacing: .2px; font-variant-numeric: tabular-nums; }
-.stat-sub { font-size: .74rem; color: var(--text-3); margin-top: 3px; min-height: 1.1em; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; margin-bottom: 16px; }
+.card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 13px; }
+.card-title { font-size: .9rem; font-weight: 700; display: flex; align-items: center; gap: 7px; }
+.ticon { font-size: 15px; }
+.hint { font-size: .73rem; color: var(--text-3); }
 
-/* ===== 卡片 ===== */
-.grid { display: grid; grid-template-columns: 390px 1fr; gap: 14px; align-items: start; }
-@media (max-width: 940px) { .grid { grid-template-columns: 1fr; } }
-.card {
-  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
-  box-shadow: var(--shadow); padding: 20px; margin-bottom: 14px;
-}
-.card-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 14px; }
-.card-title { font-size: .95rem; font-weight: 700; display: flex; align-items: center; gap: 8px; }
-.card-title .ticon { font-size: 1.05rem; }
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 13px; margin-bottom: 16px; }
+.stat { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 13px 15px; }
+.stat-label { font-size: .72rem; color: var(--text-3); margin-bottom: 6px; display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.stat-value { font-size: 1.4rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.stat-sub { font-size: .74rem; color: var(--text-3); margin-top: 4px; }
+.sim-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-/* ===== 表单 ===== */
-.fg { margin-bottom: 13px; }
-label.fl { display: block; font-size: .78rem; font-weight: 600; color: var(--text-2); margin-bottom: 5px; }
-input, textarea {
-  width: 100%; font-family: inherit; font-size: .86rem; color: var(--text);
-  background: var(--card-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
-  padding: 10px 12px; outline: none; transition: border-color .15s, box-shadow .15s;
-}
-input:focus, textarea:focus { border-color: var(--accent-2); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-2) 18%, transparent); }
-input[type=number] { font-variant-numeric: tabular-nums; }
+.fg { margin-bottom: 12px; }
+.fl { display: block; font-size: .77rem; color: var(--text-2); margin-bottom: 5px; font-weight: 500; }
+input, textarea, select { width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px; font-size: .85rem; font-family: inherit; background: var(--card); color: var(--text); transition: border-color .15s, box-shadow .15s; }
+input:focus, textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent); }
 textarea { resize: vertical; }
-.check { display: flex; gap: 9px; align-items: center; font-size: .82rem; color: var(--text-2); font-weight: 550; cursor: pointer; user-select: none; }
-input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
-.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
-.chip {
-  background: var(--chip); color: var(--text-2); border: 1px solid transparent;
-  padding: 4px 10px; border-radius: 999px; font-size: .74rem; cursor: pointer; user-select: none;
-  transition: all .13s ease;
-}
-.chip:hover { background: var(--chip-hover); color: var(--text); }
-.hint { font-size: .73rem; color: var(--text-3); margin-top: 4px; line-height: 1.45; }
+.chips { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+.chip { font-size: .71rem; padding: 3px 10px; border-radius: 99px; border: 1px solid var(--border); color: var(--text-2); cursor: pointer; background: none; }
+.chip:hover { border-color: var(--accent); color: var(--accent); }
+.check { display: flex; align-items: center; gap: 8px; font-size: .81rem; color: var(--text-2); cursor: pointer; }
+.check input { width: auto; }
 
-/* ===== 开关行 ===== */
-.tg-row {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  background: var(--card-2); border: 1px solid var(--border-soft); border-radius: var(--radius-sm);
-  padding: 12px 14px; margin-bottom: 11px;
-}
-.tg-row .tt { font-size: .85rem; font-weight: 650; }
-.tg-row .td { font-size: .73rem; color: var(--text-3); margin-top: 2px; }
+.btn { padding: 9px 18px; border-radius: 8px; border: none; background: var(--accent); color: #fff; font-size: .85rem; font-weight: 500; cursor: pointer; font-family: inherit; transition: filter .15s; }
+.btn:hover { filter: brightness(1.08); }
+.btn:disabled { opacity: .6; cursor: not-allowed; }
+.btn-sm { padding: 5px 12px; font-size: .75rem; border-radius: 7px; }
+.btn-ghost { background: none; border: 1px solid var(--border); color: var(--text-2); cursor: pointer; font-family: inherit; font-size: .78rem; border-radius: 7px; }
+.btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+.btn-ok { background: var(--ok); color: #fff; border: none; cursor: pointer; }
+.btn-bad { background: var(--bad); color: #fff; border: none; cursor: pointer; }
+.btn-violet { background: var(--violet); color: #fff; border: none; cursor: pointer; padding: 8px 16px; font-size: .8rem; border-radius: 8px; }
+.icon-btn { background: none; border: 1px solid var(--border); border-radius: 8px; width: 32px; height: 32px; cursor: pointer; font-size: 14px; color: var(--text-2); }
+.icon-btn:hover { border-color: var(--accent); color: var(--accent); }
 
-/* ===== 短信列表 ===== */
-.sms-list { display: flex; flex-direction: column; gap: 10px; }
-.sms {
-  border: 1px solid var(--border-soft); border-radius: 12px; padding: 13px 15px;
-  background: var(--card-2); animation: rise .25s ease both;
-}
-@keyframes rise { from { opacity: 0; transform: translateY(5px) } to { opacity: 1; transform: none } }
-.sms-meta { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; }
-.sms-from { font-size: .84rem; font-weight: 700; display: flex; align-items: center; gap: 7px; }
-.sms-from .code-chip {
-  font-size: .7rem; font-weight: 700; color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
-  padding: 1px 8px; border-radius: 999px; font-variant-numeric: tabular-nums;
-}
-.sms-time { font-size: .72rem; color: var(--text-3); font-variant-numeric: tabular-nums; }
-.sms-body { font-size: .86rem; color: var(--text-2); white-space: pre-wrap; word-break: break-word; }
-.sms-foot { display: flex; justify-content: flex-end; gap: 7px; margin-top: 9px; }
-.empty { text-align: center; color: var(--text-3); padding: 34px 0; font-size: .82rem; }
+.badge { font-size: .69rem; padding: 3px 10px; border-radius: 99px; font-weight: 500; display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.badge .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.badge-online { background: color-mix(in srgb, var(--ok) 12%, transparent); color: var(--ok); }
+.badge-offline { background: color-mix(in srgb, var(--bad) 12%, transparent); color: var(--bad); }
+.badge-lock { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
+.badge-unlock { background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn); }
 
-/* ===== Toast ===== */
-#toast {
-  position: fixed; bottom: 26px; right: 26px; z-index: 99;
-  background: var(--toast-bg); color: var(--toast-fg);
-  padding: 11px 18px; border-radius: 12px; font-size: .84rem; font-weight: 550;
-  box-shadow: var(--shadow-lg); opacity: 0; transform: translateY(12px);
-  transition: all .28s cubic-bezier(.2,.9,.3,1.2); pointer-events: none; max-width: 78vw;
-}
-#toast.show { opacity: 1; transform: none; }
+.sms-list { display: flex; flex-direction: column; gap: 10px; max-height: 580px; overflow-y: auto; }
+.sms { border: 1px solid var(--border); border-radius: 9px; padding: 12px 14px; background: var(--card); }
+.sms-meta { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; gap: 8px; }
+.sms-from { font-size: .83rem; font-weight: 600; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sms-time { font-size: .69rem; color: var(--text-3); white-space: nowrap; }
+.sms-body { font-size: .83rem; color: var(--text-2); line-height: 1.55; word-break: break-all; }
+.sms-foot { display: flex; gap: 8px; margin-top: 9px; }
+.code-chip { background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent); font-weight: 700; font-size: .79rem; padding: 2px 10px; border-radius: 6px; cursor: pointer; font-family: ui-monospace, Menlo, monospace; letter-spacing: .03em; }
+.empty { text-align: center; color: var(--text-3); font-size: .8rem; padding: 34px 0; }
 
-/* ===== 推送设置区 ===== */
-.push-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-@media (max-width: 760px) { .push-grid { grid-template-columns: 1fr; } }
+.result { font-size: .77rem; color: var(--text-2); margin-top: 10px; min-height: 1.2em; }
+.result.ok { color: var(--ok); }
+.result.bad { color: var(--warn); }
+.mode-tip { font-size: .78rem; color: var(--text-3); background: var(--bg); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
+.tg-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 9px; margin-bottom: 12px; }
+.tt { font-size: .83rem; font-weight: 600; }
+.td { font-size: .73rem; color: var(--text-3); margin-top: 2px; }
+#toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(20px); background: var(--text); color: var(--bg); padding: 10px 20px; border-radius: 99px; font-size: .8rem; opacity: 0; pointer-events: none; transition: all .25s; z-index: 99; box-shadow: 0 6px 20px rgba(0,0,0,.18); }
+#toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 .push-col > .card { margin-bottom: 0; }
-.result { font-size: .78rem; color: var(--text-2); margin-top: 10px; min-height: 1.2em; }
-.result.ok { color: var(--ok); } .result.bad { color: var(--warn); }
-.mode-tip {
-  font-size: .74rem; color: var(--text-2); background: color-mix(in srgb, var(--warn) 9%, var(--card-2));
-  border: 1px solid color-mix(in srgb, var(--warn) 22%, transparent); border-radius: 9px; padding: 8px 12px; margin-bottom: 13px;
+.push-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+@media (max-width: 900px) {
+  .layout { flex-direction: column; }
+  aside { width: 100%; height: auto; position: static; flex-direction: row; align-items: center; padding: 0 10px; border-right: none; border-bottom: 1px solid var(--border); overflow-x: auto; }
+  .brand { padding: 10px 8px; } .brand small { display: none; }
+  nav { display: flex; padding: 0 4px; overflow-x: auto; }
+  .nav-sec, .side-foot { display: none; }
+  .nav-item { white-space: nowrap; width: auto; padding: 8px 10px; }
+  .content { padding: 14px 12px 40px; }
+  .stats { grid-template-columns: 1fr 1fr; }
+  .push-grid { grid-template-columns: 1fr; }
 }
-.sim-line { display: flex; align-items: center; gap: 8px; font-size: .8rem; font-weight: 600; color: var(--text-2); min-height: 1.2em; }
-.sim-line .flag { font-size: 1rem; }
-hr.sep { border: none; border-top: 1px solid var(--border-soft); margin: 13px 0; }
 </style>
 </head>
-<body data-theme="light">
-<div class="wrap">
+<body data-theme="light"><div class="layout">
 
-<header>
+<aside>
   <div class="brand">
     <div class="logo">📶</div>
-    <div><h1>YN076 短信网关<small>SMS Gateway · Serial</small></h1></div>
+    <h1>YN076 短信网关<small>SMS Gateway · Serial</small></h1>
   </div>
-  <span id="dongle-badge" class="badge badge-offline"><span class="dot"></span>检测中…</span>
-  <span id="data-badge" class="badge badge-lock">🛡️ 0 流量保护</span>
-  <button class="icon-btn" id="theme-btn" onclick="toggleTheme()" title="切换主题">🌙</button>
-  <button class="btn-ghost btn-sm" onclick="fetchStatus(); fetchInbox(); fetchOutbox(); loadBark(); loadSimNumber();">⟳ 刷新</button>
-</header>
+  <nav>
+    <div class="nav-sec">主菜单</div>
+    <button class="nav-item active" data-page="pg-home" onclick="switchPage('pg-home', this)"><span class="nico">🏠</span>概览</button>
+    <div class="nav-sec">管理</div>
+    <button class="nav-item" data-page="pg-push" onclick="switchPage('pg-push', this)"><span class="nico">🔔</span>推送通知</button>
+    <button class="nav-item" data-page="pg-traffic" onclick="switchPage('pg-traffic', this)"><span class="nico">📡</span>流量管理</button>
+  </nav>
+  <div class="side-foot">
+    <div class="side-user">
+      <div class="avatar">S</div>
+      <div style="min-width:0"><div class="sun">SIM 网关</div><div class="seu sim-line" id="stat-sim">SIM: 检查中…</div></div>
+    </div>
+  </div>
+</aside>
 
-<!-- 状态卡 -->
+<div class="main">
+  <div class="topbar">
+    <span class="badge badge-offline" id="dongle-badge"><span class="dot"></span>780 检测中</span>
+    <span class="badge badge-lock" id="data-badge">🛡️ 0 流量保护</span>
+    <span style="flex:1"></span>
+    <button class="icon-btn" id="theme-btn" onclick="toggleTheme()" title="切换主题">🌙</button>
+  </div>
+
+  <div class="content">
+
+    <div class="page active" id="pg-home">
 <div class="stats">
   <div class="stat">
     <div class="stat-label">Dongle 状态 <span id="stat-mode" class="hint" style="margin:0"></span></div>
     <div class="stat-value" id="stat-status">离线</div>
     <div class="stat-sub sim-line" id="stat-number" style="cursor:pointer;font-weight:700" onclick="editNumber()" title="点击修改号码">📱 点击设置号码</div>
-                <div class="stat-sub sim-line" id="stat-sim">SIM: 检查中…</div>
-  </div>
+                </div>
   <div class="stat g">
     <div class="stat-label">蜂窝累计流量 <button class="btn-ghost btn-sm" style="padding:1px 8px;font-size:.68rem" onclick="resetTraffic()">清零</button></div>
     <div class="stat-value" id="stat-traffic-total" style="color:var(--ok)">0 KB</div>
@@ -531,17 +522,17 @@ hr.sep { border: none; border-top: 1px solid var(--border-soft); margin: 13px 0;
     <div class="stat-sub">收件箱 / 发件箱</div>
   </div>
 </div>
-
-<!-- 推送设置 -->
-<div class="card" style="margin-bottom:18px">
-  <div class="card-head"><span class="card-title"><span class="ticon">🔔</span>推送通知</span><span class="hint" style="margin:0">Bark 推送通知</span></div>
-  <div id="push-mode-tip" class="mode-tip" style="display:none"></div>
-  <div class="push-grid">
-    
+<div class="card">
+      <div class="card-head">
+        <span class="card-title"><span class="ticon">📥</span>收件箱</span>
+        <span class="hint" id="inbox-update-time" style="margin:0">自动更新中</span>
       </div>
+      <div id="inbox-list" class="sms-list"><div class="empty">加载中…</div></div>
     </div>
-    <div class="push-col">
-      <div class="card" style="padding:16px;border-color:color-mix(in srgb, var(--violet) 30%, var(--border))">
+    </div>
+
+    <div class="page" id="pg-push">
+<div class="card" style="padding:16px;border-color:color-mix(in srgb, var(--violet) 30%, var(--border))">
         <div class="card-head" style="margin-bottom:10px"><span class="card-title" style="font-size:.88rem">🍎 Bark (iOS)</span><span class="badge badge-unlock" id="bark-state">读取中</span></div>
         <label class="check" style="margin-bottom:11px"><input type="checkbox" id="bark-enabled">启用新短信自动推送</label>
         <div class="fg"><label class="fl" for="bark-key">DeviceKey</label><input id="bark-key" type="password" autocomplete="new-password" placeholder="Bark App 内复制的 Key"><div class="hint" id="bark-key-hint">留空保留已保存值，不回显明文。</div></div>
@@ -566,13 +557,22 @@ hr.sep { border: none; border-top: 1px solid var(--border-soft); margin: 13px 0;
         </div>
         <div class="result" id="bark-result">尚未测试；自动推送默认关闭。</div>
       </div>
+    
+<div class="card">
+      <div class="card-head"><span class="card-title"><span class="ticon">✈️</span>Telegram 推送</span><span class="badge badge-unlock" id="tg-state">未配置</span></div>
+      <div class="fg"><label class="fl" for="tg-token">Bot Token</label><input id="tg-token" type="password" autocomplete="new-password" placeholder="123456789:AAA...（@BotFather 创建）"><div class="hint" id="tg-token-hint">留空保留已保存值，不回显明文。</div></div>
+      <div class="fg"><label class="fl" for="tg-chat">Chat ID</label><input id="tg-chat" placeholder="你的用户 ID（@userinfobot 查询）"><div class="hint" id="tg-chat-hint"></div></div>
+      <label class="check" style="margin-bottom:11px"><input type="checkbox" id="tg-enabled">启用新短信自动推送</label>
+      <div style="display:flex;gap:8px">
+        <button class="btn" onclick="saveTg()">保存配置</button>
+        <button class="btn-violet" onclick="testTg()">发送测试</button>
+      </div>
+      <div class="result" id="tg-result">尚未配置。</div>
     </div>
-  </div>
-</div>
+    </div>
 
-<div class="grid">
-  <div>
-    <div class="card">
+    <div class="page" id="pg-traffic">
+<div class="card">
       <div class="card-head"><span class="card-title"><span class="ticon">📡</span>蜂窝流量管理</span></div>
       <div class="tg-row">
         <div><div class="tt" id="toggle-title">0 流量保护：已开启</div><div class="td" id="toggle-desc">独立 IP 模式物理阻断 4G 数据，仅走短信信令</div></div>
@@ -591,42 +591,13 @@ hr.sep { border: none; border-top: 1px solid var(--border-soft); margin: 13px 0;
         <div class="result" id="consume-result" style="display:none"></div>
       </div>
     </div>
-
-    <div class="card">
-      <div class="card-head"><span class="card-title"><span class="ticon">📤</span>发送短信</span></div>
-      <form id="send-form" onsubmit="handleSend(event)">
-        <div class="fg"><label class="fl" for="send-num">接收号码</label><input id="send-num" placeholder="10086 或手机号" required>
-          <div class="chips">
-            <span class="chip" onclick="setNum('10086','102')">移动话费</span>
-            <span class="chip" onclick="setNum('10010','102')">联通话费</span>
-            <span class="chip" onclick="setNum('10001','102')">电信话费</span>
-          </div>
-        </div>
-        <div class="fg"><label class="fl" for="send-text">短信内容</label><textarea id="send-text" rows="3" placeholder="输入短信内容…" required></textarea></div>
-        <button type="submit" id="btn-submit" class="btn" style="width:100%">立即排队发送</button>
-      </form>
     </div>
 
-    <div class="card">
-      <div class="card-head"><span class="card-title"><span class="ticon">📋</span>发件记录</span><button class="btn-ghost btn-sm" onclick="fetchOutbox()">刷新</button></div>
-      <div id="outbox-list" class="sms-list" style="max-height:220px;overflow-y:auto"><div class="empty">暂无发件记录</div></div>
-    </div>
-  </div>
-
-  <div>
-    <div class="card">
-      <div class="card-head">
-        <span class="card-title"><span class="ticon">📥</span>收件箱</span>
-        <span class="hint" id="inbox-update-time" style="margin:0">自动更新中</span>
-      </div>
-      <div id="inbox-list" class="sms-list"><div class="empty">加载中…</div></div>
-    </div>
   </div>
 </div>
-</div>
+
 
 <div id="toast"></div>
-
 <script>
 let currentDataEnabled = false;
 const $ = id => document.getElementById(id);
@@ -773,33 +744,14 @@ async function fetchInbox() {
         let codeChip = '';
         const mm = (m.content || '').match(/(?:验证码|校验码|动态码|动态密码|登录码|CODE|Code|code|OTP|otp)[^\d]{0,8}(\d{4,8})/);
         if (mm) codeChip = '<span class="code-chip" title="点击复制验证码" onclick="copyText(\'' + mm[1] + '\')">' + mm[1] + '</span>';
-        return '<div class="sms"><div class="sms-meta"><span class="sms-from">📞 ' + escHtml(m.sender) + codeChip + '</span><span class="sms-time">' + fmtTime(m.received_at || m.sms_time) + '</span></div><div class="sms-body">' + escHtml(m.content) + '</div><div class="sms-foot"><button class="btn-ghost btn-sm" onclick="copyText(\'' + escJs(m.content) + '\')">复制</button><button class="btn-ghost btn-sm" onclick="setNum(\'' + escJs(m.sender) + '\', \'\')">回复</button></div></div>';
+        return '<div class="sms"><div class="sms-meta"><span class="sms-from">📞 ' + escHtml(m.sender) + codeChip + '</span><span class="sms-time">' + fmtTime(m.received_at || m.sms_time) + '</span></div><div class="sms-body">' + escHtml(m.content) + '</div><div class="sms-foot"><button class="btn-ghost btn-sm" onclick="copyText(\'' + escJs(m.content) + '\')">复制</button></div></div>';
       }).join('');
     } else box.innerHTML = '<div class="empty">收件箱为空</div>';
     $('inbox-update-time').textContent = '同步于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
   } catch (e) { $('inbox-list').innerHTML = '<div class="empty" style="color:var(--bad)">拉取收件箱失败</div>'; }
 }
-async function fetchOutbox() {
-  try {
-    const r = await (await fetch('/api/sms/outbox?limit=10')).json();
-    const box = $('outbox-list');
-    if (r.ok && r.data && r.data.length) {
-      box.innerHTML = r.data.map(m => '<div class="sms" style="padding:10px 13px"><div class="sms-meta" style="margin-bottom:3px"><span class="sms-from" style="font-size:.8rem">→ ' + escHtml(m.recipient) + '</span><span class="sms-time">' + fmtTime(m.created_at) + '</span></div><div class="sms-body" style="font-size:.78rem;color:var(--text-3)">' + escHtml(m.content) + ' · ' + escHtml(m.status) + '</div></div>').join('');
-    } else box.innerHTML = '<div class="empty">暂无发件历史</div>';
-  } catch (e) {}
-}
-async function handleSend(e) {
-  e.preventDefault();
-  const num = $('send-num').value.trim(), text = $('send-text').value.trim();
-  if (!num || !text) return;
-  const btn = $('btn-submit'); btn.disabled = true; btn.textContent = '提交中…';
-  try {
-    const d = await (await fetch('/api/sms/send', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ num, text }) })).json();
-    if (d.ok) { showToast('已提交发件队列'); $('send-text').value = ''; fetchStatus(); fetchOutbox(); loadBark(); loadSimNumber(); }
-    else showToast('发送失败: ' + (d.msg || '未知错误'));
-  } catch (err) { showToast('请求异常，请检查网络'); }
-  finally { btn.disabled = false; btn.textContent = '立即排队发送'; }
-}
+async function fetchOutbox() {}
+async function handleSend(e) { if (e) e.preventDefault(); showToast('发送已移至 API'); }
 
 /* ===== (已移除) ===== */
 
@@ -856,10 +808,51 @@ async function testBark() {
     barkFeedback(d.msg, d.ok);
   } catch (e) { barkFeedback('测试请求失败，请检查网络。', false); } finally { btn.disabled = false; }
 }
+/* ===== Telegram 推送 ===== */
+async function loadTg() {
+  try {
+    const d = await (await fetch('/api/tg', { cache: 'no-store' })).json();
+    if (d.error) throw Error(d.error);
+    const c = d.config || {};
+    $('tg-enabled').checked = !!c.enabled;
+    $('tg-chat').value = c.chat_id || '';
+    $('tg-token-hint').textContent = c.token_configured ? 'Token 已保存；留空保留。' : '尚未配置 Token。';
+    const st = $('tg-state');
+    st.textContent = c.enabled && c.token_configured ? '已启用' : '未配置';
+    st.className = 'badge ' + (c.enabled && c.token_configured ? 'badge-online' : 'badge-unlock');
+  } catch (e) { $('tg-result').textContent = '读取失败: ' + e.message; }
+}
+async function saveTg() {
+  try {
+    const payload = { token: $('tg-token').value.trim(), chat_id: $('tg-chat').value.trim(), enabled: $('tg-enabled').checked };
+    const d = await (await fetch('/api/tg', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) })).json();
+    if (d.error) throw Error(d.error);
+    $('tg-result').textContent = '配置已保存'; $('tg-result').className = 'result ok';
+    $('tg-token').value = '';
+    loadTg();
+  } catch (e) { $('tg-result').textContent = '保存失败: ' + e.message; $('tg-result').className = 'result bad'; }
+}
+async function testTg() {
+  try {
+    const d = await (await fetch('/api/tg/test', { method: 'POST' })).json();
+    $('tg-result').textContent = d.msg; $('tg-result').className = 'result ' + (d.ok ? 'ok' : 'bad');
+  } catch (e) { $('tg-result').textContent = '测试请求失败'; $('tg-result').className = 'result bad'; }
+}
+
 
 /* ===== 启动 ===== */
-fetchStatus(); fetchInbox(); fetchOutbox(); loadBark(); loadSimNumber();  loadBark();
+fetchStatus(); fetchInbox(); loadBark(); loadTg();
 setInterval(() => { fetchStatus(); fetchInbox(); }, 6000);
+
+/* ===== SPA 导航 ===== */
+function switchPage(pid, btn) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
+  $(pid).classList.add('active');
+  if (btn) btn.classList.add('active');
+  try { localStorage.setItem('sms-page', pid); } catch(e) {}
+}
+try { const sp = localStorage.getItem('sms-page'); if (sp && $(sp)) switchPage(sp, document.querySelector('[data-page="'+sp+'"]')); } catch(e) {}
 </script>
 </body>
 </html>
@@ -885,9 +878,11 @@ class SMSRequestHandler(BaseHTTPRequestHandler):
 
         if path in ("/", "/index.html", "/ui"):
             self._html_resp(200, HTML_PAGE)
+            return
 
         elif path == "/health":
             self._json_resp(200, {"status": "ok", "service": "sms-relay"})
+            return
 
         elif path == "/api/sim_number":
             conn0 = sqlite3.connect(CONFIG["DB_PATH"])
@@ -898,6 +893,7 @@ class SMSRequestHandler(BaseHTTPRequestHandler):
             finally:
                 conn0.close()
             self._json_resp(200, {"ok": True, "number": custom})
+            return
 
         elif path == "/api/status":
             r = serial_780.command("get_status", timeout=4)
@@ -959,6 +955,7 @@ class SMSRequestHandler(BaseHTTPRequestHandler):
                 "outbox_total": outbox_count,
                 "dongle": dongle_status
             })
+            return
 
         elif path == "/api/sms/inbox":
             qs = urllib.parse.parse_qs(parsed.query)
@@ -976,11 +973,23 @@ class SMSRequestHandler(BaseHTTPRequestHandler):
             conn.close()
 
             self._json_resp(200, {"ok": True, "count": len(items), "data": items})
+            return
 
-        elif path == "/api/bark":
+        elif path == "/api/tg":
+            try:
+                self._json_resp(200, {"ok": True, "config": tg_cfg.public()})
+            except Exception as e:
+                self._json_resp(200, {"error": str(e)})
+            return
+        elif path == "/api/tg/test":
+            ok = send_tg("📱 YN076 测试", "Telegram 推送通道正常 ✅")
+            self._json_resp(200, {"ok": ok, "msg": "推送成功" if ok else "推送失败（检查 Token/ChatID/网络）"})
+            return
+        if path == "/api/bark":
             cfg = get_bark_config()
             if not cfg:
                 self._json_resp(200, {"configured": False})
+                return
             else:
                 # 脱敏返回
                 masked = cfg["key"][:4] + "****" + cfg["key"][-4:] if len(cfg["key"]) > 8 else "****"
@@ -992,6 +1001,7 @@ class SMSRequestHandler(BaseHTTPRequestHandler):
                     "group": cfg["group"],
                     "encrypted": bool(cfg["enc_key"] and cfg["enc_iv"]),
                 })
+                return
 
         elif path == "/api/sms/outbox":
             qs = urllib.parse.parse_qs(parsed.query)
@@ -1009,6 +1019,7 @@ class SMSRequestHandler(BaseHTTPRequestHandler):
             conn.close()
 
             self._json_resp(200, {"ok": True, "count": len(items), "data": items})
+            return
 
         else:
             self._json_resp(404, {"error": "Not Found"})
@@ -1032,6 +1043,19 @@ class SMSRequestHandler(BaseHTTPRequestHandler):
             return
 
         # 发短信
+        if path == "/api/tg":
+            data = json.loads(self._read_body() or "{}")
+            try:
+                clean = {}
+                if str(data.get("token", "")).strip(): clean["bot_token"] = str(data["token"]).strip()
+                if "chat_id" in data: clean["chat_id"] = str(data.get("chat_id", "")).strip()
+                if "enabled" in data: clean["enabled"] = bool(data["enabled"])
+                if data.get("clear_token"): clean["clear_token"] = True
+                tg_cfg.save(clean)
+                self._json_resp(200, {"ok": True})
+            except Exception as e:
+                self._json_resp(200, {"error": str(e)})
+                return
         if path == "/api/bark":
             # 保存 Bark 配置
             try:
@@ -1073,10 +1097,12 @@ class SMSRequestHandler(BaseHTTPRequestHandler):
             conn.close()
             print(f"[Bark] 配置已保存（server={server}, enc={'on' if enc_key else 'off'}）")
             self._json_resp(200, {"ok": True, "msg": "Bark 配置已保存"})
+            return
 
         elif path == "/api/bark/test":
             ok = send_bark("🔔 YN076 测试通知", "Bark 推送通道正常 ✅", copy="123456")
             self._json_resp(200, {"ok": ok, "msg": "推送成功" if ok else "推送失败（检查 Key/网络）"})
+            return
 
         elif path == "/api/sms/send":
             try:
@@ -1095,6 +1121,7 @@ class SMSRequestHandler(BaseHTTPRequestHandler):
                 if r.get("ok"):
                     save_outbox_sms(sms_id, num, text, r.get("status", "queued"))
                     self._json_resp(200, {"ok": True, "id": sms_id, "msg": "已提交给 780 发送"})
+                    return
                 else:
                     save_outbox_sms(sms_id, num, text, "failed")
                     self._json_resp(502, {"ok": False, "msg": f"780 拒绝: {r.get('error', r.get('status'))}"})
@@ -1138,6 +1165,7 @@ class SMSRequestHandler(BaseHTTPRequestHandler):
                 self._json_resp(200, {"ok": bool(r.get("ok")), "msg": "v2 串口版暂不支持清零", "traffic": r.get("traffic")})
             except Exception as e:
                 self._json_resp(500, {"ok": False, "msg": str(e)})
+                return
 
         else:
             self._json_resp(404, {"error": "Not Found"})

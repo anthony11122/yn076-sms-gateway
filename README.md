@@ -16,7 +16,9 @@
 - 🛡️ **零蜂窝流量**：启动即 `mobile.setDataEnable(false)` 关闭 PDP 数据上下文（短信走信令通道不受影响）；无 sntp、无任何自动公网请求；"定量消耗保号"是唯一走流量的入口（临时开 PDP → 下载 → 立即关）
 - 📨 **收发短信**：收信主动推送（无需轮询）+ SQLite 落库；发信队列化（pending→sending→sent/failed 状态机）
 - 🔔 **Bark 推送**：面板可视化配置，支持自建 bark-server（Basic Auth）、官方服务器、AES-128-CBC 端到端加密；验证码自动提取进推送标题、`copy` 字段一键复制
-- 🌍 **SIM 卡归属地识别**：ICCID(ITU E.118)/IMSI(MCC/MNC) 离线库，面板状态卡显示旗帜+国家（如 🇵🇹 葡萄牙）；号码备注可点击编辑（如 📱 +372 xxxx）
+- 🌍 **SIM 卡归属地识别**：ICCID(ITU E.118)/IMSI(MCC/MNC) 离线库，面板状态卡显示旗帜+国家；号码备注可点击编辑
+- ✈️ **Telegram 推送**：Bot Token + Chat ID 面板配置（系统 curl 发送，支持 SOCKS5 代理），与新短信 Bark 推送并行双通道
+- 🎛️ **SPA 管理面板**：侧边栏导航（概览/推送通知/流量管理），概览=收件为中心（状态统计+收件箱）；暗色/浅色主题持久化
 - 📊 **流量管理**：基带级上下行计数（`mobile.dataTraffic()`）、按 KB 定量消耗（保号/激活计费）、单次上限 50MB
 - 🎨 **现代化 UI**：暗色/浅色主题（🌙 切换、localStorage 持久化）、Bento 卡片布局、验证码高亮 chip 点击复制、Toast 提示
 - 🐕 **设备端自愈**：硬件看门狗（9s 超时 3s 喂狗）、每小时内存回收、`mobile.setAuto` 网络自愈、短信队列断电不丢
@@ -28,9 +30,10 @@
 dongle/
 └── main.lua              # 780 端脚本 v002.000.002（串口 JSON 协议 + 流量锁 + 看门狗自愈）
 server/
-├── sms_relay.py          # 服务端主程序（WebUI + SQLite + Bark 推送 + SIM 归属地）
+├── sms_relay.py          # 服务端主程序（SPA WebUI + SQLite + Bark/TG 推送 + SIM 归属地）
 ├── serial_780.py         # 串口通信层（自动探测 ttyACM0-2 / 断线重连 / 命令-响应匹配）
 ├── sim_info.py           # SIM 归属地离线库（ICCID/IMSI → 国家+运营商）
+├── tg_settings.py        # Telegram 推送配置（curl + SOCKS5 代理）
 └── sms-relay.service     # systemd 单元
 docs/
 └── 烧录与部署指南.md      # 从烧录到上线的完整步骤
@@ -87,7 +90,9 @@ Dongle 插服务器 USB 口（或 PVE 直通进 VM），出现 `/dev/ttyACM0-2`�
 | GET | `/api/status` | 服务+设备状态（含 `sim` 归属地、`display_number` 号码） |
 | GET/POST | `/api/sim_number` | 号码备注（面板点击号码编辑） |
 | GET/POST | `/api/bark` | Bark 配置 |
-| POST | `/api/bark/test` | 发送测试推送 |
+| POST | `/api/bark/test` | 发送 Bark 测试推送 |
+| GET/POST | `/api/tg` | Telegram 推送配置 |
+| POST | `/api/tg/test` | 发送 Telegram 测试推送 |
 | GET | `/api/sms/inbox` / `/api/sms/outbox` | 收件箱 / 发件记录 |
 | POST | `/api/sms/send` | 发短信 `{"num":"...","text":"..."}` |
 | POST | `/api/data/consume` | 定量消耗 `{"kb":1024}` |
