@@ -1,0 +1,19 @@
+[Unit]
+Description=SMS Relay Service (Air780EPM serial)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/sms-relay
+Environment=SERVER_PORT=8088
+Environment=DB_PATH=/var/lib/sms-relay/sms.db
+# 自建 bark-server Basic Auth（可选，都填才启用）
+# Environment=BARK_AUTH_USER=user
+# Environment=BARK_AUTH_PASS=pass
+ExecStart=/usr/bin/python3 /opt/sms-relay/sms_relay.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
